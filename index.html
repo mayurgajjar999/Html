@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Δ BTC Options Monitor</title>
+  <style>
+    body { font-family: sans-serif; margin: 1rem; }
+    label { display:block; margin-top:1rem; }
+    input, button, textarea { width:100%; padding:0.5rem; margin-top:0.25rem; }
+    #log { white-space: pre-wrap; background:#f5f5f5; padding:1rem; height:200px; overflow:auto; }
+  </style>
+</head>
+<body>
+
+  <h1>Δ BTC Options Monitor</h1>
+
+  <!-- 1) Your API credentials & settings -->
+  <label>
+    Gemini API Key:
+    <input id="geminiKey" placeholder="sk-…"/>
+  </label>
+  <label>
+    Telegram Bot Token:
+    <input id="tgToken" placeholder="123456:ABC-DEF…"/>
+  </label>
+  <label>
+    Telegram Chat ID:
+    <input id="tgChatId" placeholder="@yourchannel or 123456789"/>
+  </label>
+
+  <!-- 2) Controls -->
+  <button id="startBtn">Start Monitoring</button>
+
+  <!-- 3) Live status & last output -->
+  <h2>Status</h2>
+  <div id="status">Stopped</div>
+  <h2>Last Analysis</h2>
+  <textarea id="lastOutput" readonly></textarea>
+
+  <!-- 4) Debug log -->
+  <h2>Log</h2>
+  <div id="log"></div>
+
+<script>
+(function(){
+  const INTERVAL_MIN = 15;
+  let timerId = null;
+
+  // DOM refs
+  const geminiKey = document.getElementById('geminiKey');
+  const tgToken   = document.getElementById('tgToken');
+  const tgChatId  = document.getElementById('tgChatId');
+  const startBtn  = document.getElementById('startBtn');
+  const statusDiv = document.getElementById('status');
+  const lastOutputTA = document.getElementById('lastOutput');
+  const logDiv    = document.getElementById('log');
+
+  // Utility: log to page
+  function log(msg){
+    const t = new Date().toLocaleTimeString();
+    logDiv.textContent += `[${t}] ${msg}\n`;
+    logDiv.scrollTop = logDiv.scrollHeight;
+  }
+
+  // Main workflow
+  async function runWorkflow(){
+    try {
+      statusDiv.textContent = 'Fetching option chain…';
+      log('Fetching Δ API…');
+      const resp = await fetch('https://api.india.delta.exchange/v2/tickers?contract_types=call_options,put_options&underlying_asset_symbols=BTC');
+      const data = await resp.json();
+
+      statusDiv.textContent = 'Calling Gemini…';
+      log('Sending to Gemini for analysis…');
+      const prompt = `
+Given this BTC options chain JSON, tell me:
+1) Which strike has the highest open interest?
+2) Which strike has the highest buying interest (largest bid size)?
+Answer briefly.
+`;
+      const gemResp = await fetch('https://api.gemini.com/v1/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type':'application/json',
+          'Authorization': `Bearer ${geminiKey.value}`
+        },
+        body: JSON.stringify({
+          model: 'gpt-4o-mini',
+          messages: [{ role:'user', content: prompt }],
+        })
+      });
+      const gemJson = await gemResp.json();
+      const analysis = gemJson.choices?.[0]?.message?.content?.trim() || JSON.stringify(gemJson);
+
+      statusDiv.textContent = 'Comparing with last…';
+      const prev = localStorage.getItem('last_delta_analysis') || '';
+      if (analysis === prev) {
+        log('No change in analysis → no Telegram message.');
+        statusDiv.textContent = 'No change';
+        return;
+      }
+
+      // Save new result
+      localStorage.setItem('last_delta_analysis', analysis);
+      lastOutputTA.value = analysis;
+
+      // Send Telegram
+      statusDiv.textContent = 'Sending Telegram…';
+      log('Posting to Telegram…');
+      await fetch(`https://api.telegram.org/bot${tgToken.value}/sendMessage`, {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({
+          chat_id: tgChatId.value,
+          text: analysis,
+          parse_mode: 'Markdown'
+        })
+      });
+
+      statusDiv.textContent = 'Sent at ' + new Date().toLocaleTimeString();
+      log('Telegram message sent.');
+    } catch(err) {
+      console.error(err);
+      log('Error: ' + err.message);
+      statusDiv.textContent = 'Error – check log';
+    }
+  }
+
+  // Start/Stop handler
+  startBtn.addEventListener('click', () => {
+    if (timerId) {
+      clearInterval(timerId);
+      timerId = null;
+      startBtn.textContent = 'Start Monitoring';
+      statusDiv.textContent = 'Stopped';
+      log('Monitoring stopped.');
+    } else {
+      // initialize lastOutput from storage
+      lastOutputTA.value = localStorage.getItem('last_delta_analysis') || '';
+      runWorkflow(); // run immediately
+      timerId = setInterval(runWorkflow, INTERVAL_MIN * 60 * 1000);
+      startBtn.textContent = 'Stop Monitoring';
+      log('Monitoring started: interval ' + INTERVAL_MIN + ' min.');
+    }
+  });
+
+})();
+</script>
+
+</body>
+</html>
